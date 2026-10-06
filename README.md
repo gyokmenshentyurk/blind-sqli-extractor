@@ -77,8 +77,10 @@ character. Both scripts defend against this:
 6. **Auto-extension** — extraction stops on `LENGTH(...) > n`, not on a
    possibly-truncated length estimate; extra positions are appended
    automatically.
-7. **Final full-string verification** — 3-vote check that the extracted
-   string equals the stored value, with per-position mismatch reporting.
+7. **Final full-string verification** — 5-vote check that the extracted
+   string equals the stored value; wrong positions are re-extracted on
+   failure, and an unverifiable result exits non-zero instead of
+   reporting a possibly-wrong password as success.
 
 ## Usage
 
@@ -128,7 +130,7 @@ Error-based specific:
 [+] Password length: 20
 [*] Extracting 20 chars via parallel bitwise queries ...
 [*] Progress: 0nu4jd9py0gue52k1rpq
-[*] Final verification: password = '<extracted>' (3 votes) ...
+[*] Final verification: password = '<extracted>' (5 votes) ...
 [+] Verified: string matches the stored value exactly
 
 [+] Password (repr): '0nu4jd9py0gue52k1rpq' (20 chars)

